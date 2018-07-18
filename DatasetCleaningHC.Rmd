@@ -1,0 +1,314 @@
+---
+title: "Cleaning Large Dataset"
+author: "Mauro Vicic"
+date: "4/15/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyverse)
+```
+###Cleaning a Large Dataset and writing it to a new CSV file
+
+
+One of the projects during school. We were give files with patient data and we had to figure out if they will take their medicine or not. In this file I found the unique patients in the data and cleaned the data so that I have a file with all the features needed for the project.
+
+```{r}
+enrollData = read_csv("../SchoolDataSets/uopjan16_enroll_in.csv")
+claimsData = read_csv("../SchoolDataSets/uopjan16_claims_in.csv")
+lookupData = read.csv("../SchoolDataSets/uopjanref_rx_lookup.csv")
+```
+```{r}
+bblocker = read_csv("../SchoolDataSets/bbblocker.csv")
+bblocker$`National Drug Code` = as.numeric(bblocker$`National Drug Code`)
+```
+There is 5798 unique patients and 28 of them have more than one drug on the index date.
+
+```{r}
+date1 = as.Date("2013-01-01")
+date2 = as.Date("2013-03-31")
+claimsIndex = claimsData[claimsData$from_dt >= date1 & claimsData$from_dt <= date2,]
+claimsIndex$ndc = as.numeric(claimsIndex$ndc)
+AD = lookupData[lookupData$rx_group == "ANTIDIABETICS",]
+AC = lookupData[lookupData$rx_group == "ANTICOAGULANTS",]
+
+```
+Once we found Unique patients we had to create features that will help us in a future analysis.
+
+```{r}
+ADPat = claimsIndex[claimsIndex$ndc %in% AD$National.Drug.Code,]
+ACPat = claimsIndex[claimsIndex$ndc %in% AC$National.Drug.Code,]
+#filtered_ADPatdrugname = ADPat %>% group_by(pat_id) %>% summarize(ADDate = min(from_dt))
+
+filtered_ADPat = ADPat %>% group_by(pat_id) %>% slice(which.min(from_dt))
+filtered_ACPat = ACPat %>% group_by(pat_id) %>% slice(which.min(from_dt))
+filtered_ADPat = filtered_ADPat[,c(1,8,13)]
+filtered_ACPat = filtered_ACPat[,c(1,8,13)]
+colnames(filtered_ADPat)[2] = "ADDate"
+colnames(filtered_ACPat)[2] = "ACDate"
+colnames(filtered_ADPat)[3] = "ADndc"
+colnames(filtered_ACPat)[3] = "ACndc"
+indexPat = (merge(x = filtered_ADPat, y = filtered_ACPat, by = "pat_id", all = TRUE))
+indexPat = indexPat[,c(1,2,4,3,5)]
+indexPatFilt = within(indexPat, {
+  IDX_Group <- ifelse(ADDate < ACDate | is.na(ACDate), "AD", ifelse(is.na(ADDate) | ADDate > ACDate, "AC","DC"))
+})
+indexPatFilt$IDX_Group[is.na(indexPatFilt$IDX_Group)] = "AC"
+for(i in 1:length(indexPatFilt$IDX_Group)){
+  if(indexPatFilt$IDX_Group[i] == "AD"){
+    indexPatFilt$ACDate[i] = as.Date(indexPatFilt$ADDate[i])
+    }
+  if(indexPatFilt$IDX_Group[i] == "AC") {
+    indexPatFilt$ACDate[i] = as.Date(indexPatFilt$ACDate[i])
+    }
+  if(indexPatFilt$IDX_Group[i] == "DC") {
+    indexPatFilt$ACDate[i] =  as.Date(indexPatFilt$ADDate[i])
+    }
+}
+```
+
+```{r}
+colnames(indexPatFilt)[3] = "IDX_Date"
+indexPatFilt = indexPatFilt[,-2]
+str(indexPatFilt)
+```
+```{r}
+YOB = enrollData
+l = YOB$pat_id %in% indexPatFilt$pat_id
+YOBind = YOB[l,]
+indexPatFilt$YOB = YOBind[,10]
+indexPatFilt$YOB = indexPatFilt$YOB$der_yob
+indexYear = indexPatFilt$IDX_Date
+indexYear = format(as.Date(indexYear, format="%Y/%m/%d"),"%Y")
+indexYear = as.numeric(indexYear)
+indexPatFilt$IDX_Age = indexYear - indexPatFilt$YOB
+indexPatFilt$Pat_sex = YOBind$der_sex
+str(indexPatFilt)
+```
+```{r}
+lookupData$gen_nm = as.character(lookupData$gen_nm)
+IDX_gen_name = rep(0,5798)
+IDX_gen_name = as.character(IDX_gen_name)
+for(i in 1:length(indexPatFilt$pat_id)){
+    if(indexPatFilt$IDX_Group[i] == "AD")
+      {
+      IDX_gen_name[i] = lookupData$gen_nm[indexPatFilt$ADndc[i] == lookupData$National.Drug.Code]
+      }
+    if(indexPatFilt$IDX_Group[i] == "AC")
+        {
+      IDX_gen_name[i] = lookupData$gen_nm[indexPatFilt$ACndc[i] == lookupData$National.Drug.Code]
+    }
+   if(indexPatFilt$IDX_Group[i] == "DC")
+      {
+      IDX_gen_name[i] = lookupData$gen_nm[indexPatFilt$ADndc[i] == lookupData$National.Drug.Code]
+      }
+}
+indexPatFilt$ADndc = IDX_gen_name
+colnames(indexPatFilt)[3] = "IDX_gen_name"
+indexPatFilt = indexPatFilt[,-4]
+str(indexPatFilt)
+```
+
+```{r, warning=FALSE}
+Pre_hosp = rep(0,5798)
+claimsPrePosIndexhosp = claimsData[claimsData$from_dt >= (date1-180) & claimsData$from_dt <= (date2+180),]
+claimsPrePosIndexhosp = claimsPrePosIndexhosp[(claimsPrePosIndexhosp$to_dt - claimsPrePosIndexhosp$from_dt > 0),]
+claimsPrePosIndexhosp = claimsPrePosIndexhosp[claimsPrePosIndexhosp$rectype == "F",]
+claimsPrePosIndexhosp = claimsPrePosIndexhosp[!is.na(claimsPrePosIndexhosp$pat_id),]
+```
+
+
+```{r}
+for(x in 1:length(indexPatFilt$pat_id)){ 
+  claims = claimsPrePosIndexhosp[claimsPrePosIndexhosp$to_dt < indexPatFilt$IDX_Date[x]  & claimsPrePosIndexhosp$to_dt >= (indexPatFilt$IDX_Date[x] - 180),]
+  claims = claims[claims$pat_id == indexPatFilt$pat_id[x],]
+  if(nrow(claims)>0){
+    Pre_hosp[x] = 1
+  }
+  }
+indexPatFilt$Pre_hosp = Pre_hosp
+str(indexPatFilt)
+```
+
+```{r}
+Pre_CHF = rep(0,5798)
+chfCodes = c(428,4280,4281,4282,42820,42821,42822,42823,42830,42831,42832,42833,42840,42841,42842,42843,4289)
+claimsPrePosIndexCHF = claimsData[claimsData$from_dt >= (date1-180) & claimsData$from_dt <= (date2+180),]
+claimsPrePosIndexCHF = claimsPrePosIndexCHF[(claimsPrePosIndexCHF$diag1 %in% chfCodes | claimsPrePosIndexCHF$diag2 %in% chfCodes | claimsPrePosIndexCHF$diag3 %in% chfCodes | claimsPrePosIndexCHF$diag4 %in% chfCodes),]
+```
+
+```{r}
+for(x in 1:length(indexPatFilt$pat_id)){ 
+  claims = claimsPrePosIndexCHF[claimsPrePosIndexCHF$to_dt < indexPatFilt$IDX_Date[x]  & claimsPrePosIndexCHF$to_dt >= (indexPatFilt$IDX_Date[x] - 180),]
+  claims = claims[claims$pat_id == indexPatFilt$pat_id[x],]
+  if(nrow(claims)>0){
+    Pre_CHF[x] = 1
+  }
+  }
+indexPatFilt$Pre_CHF = Pre_CHF
+str(indexPatFilt)
+```
+
+```{r}
+Pre_BBlocker = rep(0,5798)
+bbCodes = bblocker$`National Drug Code`
+claimsPrePosIndexBB = claimsData[claimsData$from_dt >= (date1-180) & claimsData$from_dt <= (date2+180),]
+claimsPrePosIndexBB = claimsPrePosIndexBB[claimsPrePosIndexBB$ndc %in% bbCodes,]
+```
+
+```{r}
+for(x in 1:length(indexPatFilt$pat_id)){ 
+  claims = claimsPrePosIndexBB[claimsPrePosIndexBB$to_dt < indexPatFilt$IDX_Date[x]  & claimsPrePosIndexBB$to_dt >= (indexPatFilt$IDX_Date[x] - 180),]
+  claims = claims[claims$pat_id == indexPatFilt$pat_id[x],]
+  if(nrow(claims)>0){
+    Pre_BBlocker[x] = 1
+  }
+  }
+indexPatFilt$Pre_BBlocker = Pre_BBlocker
+str(indexPatFilt)
+```
+
+```{r}
+Post_IDX_Rx = rep(0,5798)
+Post_IDX_DS = rep(0,5798)
+IDX_PDC = rep(0,5798)
+IDX_PDC80 = rep(0,5798)
+claimsPrePosIndexIDX = claimsData[claimsData$from_dt <= (date2+180) & claimsData$from_dt >= date1,]
+claimsPrePosIndexIDX = claimsPrePosIndexIDX[!is.na(claimsPrePosIndexIDX$ndc),]
+claimsPrePosIndexIDX$ndc = as.numeric(claimsPrePosIndexIDX$ndc)
+wantedDrugs = rbind(AD,AC)
+wantedDrugs$gen_nm = as.character(wantedDrugs$gen_nm)
+claimsPrePosIndexIDX = claimsPrePosIndexIDX[!is.na(claimsPrePosIndexIDX$ndc),]
+badNDC = which(!claimsPrePosIndexIDX$ndc %in% wantedDrugs$National.Drug.Code)
+claimsPrePosIndexIDX = claimsPrePosIndexIDX[-badNDC,]
+drugNameInd = outer(claimsPrePosIndexIDX$ndc, wantedDrugs$National.Drug.Code, `==`)
+drugNameIndClean = apply(drugNameInd,1,function(x) which(x == TRUE))
+claimsPrePosIndexIDX$gm_name = wantedDrugs$gen_nm[drugNameIndClean]
+```
+
+```{r}
+for(x in 1:length(indexPatFilt$pat_id)){ 
+  claims = claimsPrePosIndexIDX[claimsPrePosIndexIDX$from_dt > indexPatFilt$IDX_Date[x]  & claimsPrePosIndexIDX$from_dt <= (indexPatFilt$IDX_Date[x] + 180),]
+  claims = claims[claims$pat_id == indexPatFilt$pat_id[x],]
+  claims = claims[claims$gm_name == indexPatFilt$IDX_gen_name[x],]
+    Post_IDX_Rx[x] = nrow(claims) + 1
+    if(nrow(claims)>0){
+    Post_IDX_DS[x] = sum(claims$DAYSSUP) + claimsPrePosIndexIDX$DAYSSUP[indexPatFilt$pat_id[x] == claimsPrePosIndexIDX$pat_id & indexPatFilt$IDX_Date[x] == claimsPrePosIndexIDX$from_dt][1]
+    }
+    if(nrow(claims) == 0){
+      Post_IDX_DS[x] = claimsPrePosIndexIDX$DAYSSUP[indexPatFilt$pat_id[x] == claimsPrePosIndexIDX$pat_id & indexPatFilt$IDX_Date[x] == claimsPrePosIndexIDX$from_dt][1]
+    }
+    IDX_PDC[x] = Post_IDX_DS[x] / 180
+    if(IDX_PDC[x]>=0.8) IDX_PDC80[x] = 1
+  }
+indexPatFilt$Post_IDX_Rx = Post_IDX_Rx
+indexPatFilt$Post_IDX_DS = Post_IDX_DS
+indexPatFilt$IDX_PDC = IDX_PDC
+indexPatFilt$IDX_PDC80 = IDX_PDC80
+str(indexPatFilt)
+```
+
+
+```{r}
+Post_hosp = rep(0,5798)
+for(x in 1:length(indexPatFilt$pat_id)){ 
+  claims = claimsPrePosIndexhosp[claimsPrePosIndexhosp$from_dt > indexPatFilt$IDX_Date[x]  & claimsPrePosIndexhosp$to_dt <= (indexPatFilt$IDX_Date[x] + 180),]
+  claims = claims[claims$pat_id == indexPatFilt$pat_id[x],]
+  if(nrow(claims)>0){
+    Post_hosp[x] = 1
+  }
+  }
+indexPatFilt$Post_hosp = Post_hosp
+str(indexPatFilt)
+```
+
+```{r}
+neither = !l
+neitherData = YOB[neither,]
+neitherdf = data.frame(pat_id = neitherData$pat_id, IDX_Date = NA, IDX_gen_name = NA, IDX_Group = NA, YOB = neitherData$der_yob, IDX_Age = NA, Pat_sex = neitherData$der_sex, Pre_hosp = NA, Pre_CHF = NA, Pre_BBlocker = NA, Post_IDX_Rx = NA, Post_IDX_DS = NA, IDX_PDC = NA, IDX_PDC80 = NA, Post_hosp = NA)
+analyticFileComplete = rbind(indexPatFilt,neitherdf)
+analyticFileComplete = analyticFileComplete[,c(1,4,3,2,5,6,7,8,9,10,11,12,13,14,15)]
+analyticFileComplete$Pat_sex[analyticFileComplete$Pat_sex == "M"] = 0
+analyticFileComplete$Pat_sex[analyticFileComplete$Pat_sex == "F"] = 1
+analyticFileComplete$Pat_sex = as.numeric(analyticFileComplete$Pat_sex)
+str(analyticFileComplete)
+```
+
+Here we filter and combine all the features needed with set criteria.
+
+```{r}
+AC1 = nrow(filter(analyticFileComplete, IDX_Age >= "0" & IDX_Age <= "18", IDX_Group =="AC"))
+AC2 = nrow(filter(analyticFileComplete, IDX_Age >= "19" & IDX_Age <= "50", IDX_Group == "AC"))
+AC3 = nrow(filter(analyticFileComplete, IDX_Age >= "51" & IDX_Age <= "65", IDX_Group == "AC"))
+AC4 = nrow(filter(analyticFileComplete, IDX_Age >= "66" & IDX_Age <= "75", IDX_Group == "AC"))
+AC5 = nrow(filter(analyticFileComplete, IDX_Age >= "75", IDX_Group == "AC"))
+AC6 = table(analyticFileComplete$IDX_Group == "AC" & analyticFileComplete$Pre_hosp == 1)[2]
+AC7 = table(analyticFileComplete$IDX_Group == "AC" & analyticFileComplete$Pre_CHF == 1)[2]
+AC8 = table(analyticFileComplete$IDX_Group == "AC" & analyticFileComplete$Pre_BBlocker == 1)[2]
+AC9 = mean(analyticFileComplete$Post_IDX_Rx[analyticFileComplete$IDX_Group == "AC"])
+AC10 = mean(analyticFileComplete$Post_IDX_DS[analyticFileComplete$IDX_Group == "AC"])
+AC11 = mean(analyticFileComplete$IDX_PDC[analyticFileComplete$IDX_Group == "AC"])
+AC13 = table(analyticFileComplete$IDX_Group == "AC" & analyticFileComplete$IDX_PDC80 == 1)[2]
+AC14 = table(analyticFileComplete$IDX_Group == "AC" & analyticFileComplete$Post_hosp == 1)[2]
+AC15 = length(analyticFileComplete$IDX_Group[analyticFileComplete$IDX_Group == "AC"]) - 4
+AC9s = sd(analyticFileComplete$Post_IDX_Rx[analyticFileComplete$IDX_Group == "AC"])
+AC10s = sd(analyticFileComplete$Post_IDX_DS[analyticFileComplete$IDX_Group == "AC"])
+AC11s = sd(analyticFileComplete$IDX_PDC[analyticFileComplete$IDX_Group == "AC"])
+AD1 = nrow(filter(analyticFileComplete, IDX_Age >= "0" & IDX_Age <= "18", IDX_Group =="AD"))
+AD2 = nrow(filter(analyticFileComplete, IDX_Age >= "19" & IDX_Age <= "50", IDX_Group == "AD"))
+AD3 = nrow(filter(analyticFileComplete, IDX_Age >= "51" & IDX_Age <= "65", IDX_Group == "AD"))
+AD4 = nrow(filter(analyticFileComplete, IDX_Age >= "66" & IDX_Age <= "75", IDX_Group == "AD"))
+AD5 = nrow(filter(analyticFileComplete, IDX_Age >= "75", IDX_Group == "AD"))
+AD6 = table(analyticFileComplete$IDX_Group == "AD" & analyticFileComplete$Pre_hosp == 1)[2]
+AD7 = table(analyticFileComplete$IDX_Group == "AD" & analyticFileComplete$Pre_CHF == 1)[2]
+AD8 = table(analyticFileComplete$IDX_Group == "AD" & analyticFileComplete$Pre_BBlocker == 1)[2]
+AD9 = mean(analyticFileComplete$Post_IDX_Rx[analyticFileComplete$IDX_Group == "AD"])
+AD10 = mean(analyticFileComplete$Post_IDX_DS[analyticFileComplete$IDX_Group == "AD"])
+AD11 = mean(analyticFileComplete$IDX_PDC[analyticFileComplete$IDX_Group == "AD"])
+AD13 = table(analyticFileComplete$IDX_Group == "AD" & analyticFileComplete$IDX_PDC80 == 1)[2]
+AD14 = table(analyticFileComplete$IDX_Group == "AD" & analyticFileComplete$Post_hosp == 1)[2]
+AD15 = length(analyticFileComplete$IDX_Group[analyticFileComplete$IDX_Group == "AD"]) - 4
+AD9s = sd(analyticFileComplete$Post_IDX_Rx[analyticFileComplete$IDX_Group == "AD"])
+AD10s = sd(analyticFileComplete$Post_IDX_DS[analyticFileComplete$IDX_Group == "AD"])
+AD11s = sd(analyticFileComplete$IDX_PDC[analyticFileComplete$IDX_Group == "AD"])
+DC1 = nrow(filter(analyticFileComplete, IDX_Age >= "0" & IDX_Age <= "18", IDX_Group =="DC"))
+DC2 = nrow(filter(analyticFileComplete, IDX_Age >= "19" & IDX_Age <= "50", IDX_Group == "DC"))
+DC3 = nrow(filter(analyticFileComplete, IDX_Age >= "51" & IDX_Age <= "65", IDX_Group == "DC"))
+DC4 = nrow(filter(analyticFileComplete, IDX_Age >= "66" & IDX_Age <= "75", IDX_Group == "DC"))
+DC5 = nrow(filter(analyticFileComplete, IDX_Age >= "75", IDX_Group == "DC"))
+DC6 = table(analyticFileComplete$IDX_Group == "DC" & analyticFileComplete$Pre_hosp == 1)[2]
+DC7 = table(analyticFileComplete$IDX_Group == "DC" & analyticFileComplete$Pre_CHF == 1)[2]
+DC8 = table(analyticFileComplete$IDX_Group == "DC" & analyticFileComplete$Pre_BBlocker == 1)[2]
+DC9 = mean(analyticFileComplete$Post_IDX_Rx[analyticFileComplete$IDX_Group == "DC"])
+DC10 = mean(analyticFileComplete$Post_IDX_DS[analyticFileComplete$IDX_Group == "DC"])
+DC11 = mean(analyticFileComplete$IDX_PDC[analyticFileComplete$IDX_Group == "DC"])
+DC13 = table(analyticFileComplete$IDX_Group == "DC" & analyticFileComplete$IDX_PDC80 == 1)[2]
+DC14 = table(analyticFileComplete$IDX_Group == "DC" & analyticFileComplete$Post_hosp == 1)[2]
+DC15 = length(analyticFileComplete$IDX_Group[analyticFileComplete$IDX_Group == "DC"]) - 4
+DC9s = sd(analyticFileComplete$Post_IDX_Rx[analyticFileComplete$IDX_Group == "DC"])
+DC10s = sd(analyticFileComplete$Post_IDX_DS[analyticFileComplete$IDX_Group == "DC"])
+DC11s = sd(analyticFileComplete$IDX_PDC[analyticFileComplete$IDX_Group == "DC"])
+a.AD = filter(analyticFileComplete, IDX_Group =="AD")
+a.AC = filter(analyticFileComplete, IDX_Group =="AC")
+a.DC = filter(analyticFileComplete, IDX_Group =="DC")
+AD0 = table(a.AD$Pat_sex)[1]
+AC0 = table(a.AC$Pat_sex)[1]
+DC0 = table(a.DC$Pat_sex)[1]
+AD_n = c(AD15, AD0,AD1,AD2,AD3, AD4, AD5, AD6, AD7, AD8, AD9, AD10, AD11,AD13,AD14)
+AD_p = c(NA, AD0/AD15,AD1/AD15,AD2/AD15,AD3/AD15, AD4/AD15, AD5/AD15, AD6/AD15, AD7/AD15, AD8/AD15, AD9s, AD10s, AD11s,AD13/AD15,AD14/AD15)
+AC_n = c(AC15, AC0,AC1,AC2,AC3, AC4, AC5, AC6, AC7, AC8, AC9, AC10, AC11,AC13,AC14)
+AC_p = c(NA, AC0/AC15,AC1/AC15,AC2/AC15,AC3/AC15, AC4/AC15, AC5/AC15, AC6/AC15, AC7/AC15, AC8/AC15, AC9s, AC10s, AC11s,AC13/AC15,AC14/AC15)
+DC_n = c(DC15, DC0,DC1,DC2,DC3, DC4, DC5, DC6, DC7, DC8, DC9, DC10, DC11,DC13,DC14)
+DC_p = c(NA, DC0/DC15,DC1/DC15,DC2/DC15,DC3/DC15, DC4/DC15, DC5/DC15, DC6/DC15, DC7/DC15, DC8/DC15, DC9s, DC10s, DC11s,DC13/DC15,DC14/DC15)
+N_n  = c(4,2,rep(NA, 13))
+N_p = c(NA, 0.5, rep(NA,13))
+hcTableShell = data.frame(AD_n,AD_p,AC_n,AC_p,DC_n,DC_p,N_n,N_p)
+colnames(hcTableShell) = c("AD_n" , "AD_p", "AC_n", "AC_p", "DC_n", "DC_p", "Neither_n", "Neither_p")
+rownames(hcTableShell) = c("N", "Male", "Age_0_18", "Age_19_50", "Age_51_65", "Age_66_75", "Age_76", "Pre_Hosp", "Pre_CHF", "Pre_B_Blocker", "Post_IDX_Rx", "Post_IDX_DS", "IDX_PDC", "IDX_PDC_80", "Post_Hosp")
+```
+
+```{r}
+write_csv(analyticFileComplete, "AnalyticalFile.csv")
+```
